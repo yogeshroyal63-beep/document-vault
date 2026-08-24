@@ -1,0 +1,42 @@
+// Prisma schema for the Document Vault service.
+// Run `bun run migrate:dev` after changing this file to generate a real
+// migration — never hand-edit files under prisma/migrations.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Collection {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+
+  documents Document[]
+
+  @@map("collections")
+}
+
+model Document {
+  id           String   @id @default(uuid())
+  title        String
+  content      String
+  tags         String[] @default([])
+  isArchived   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  collectionId String
+
+  // Supports: documents(collectionId, isArchived) and cursor pagination
+  // ordered by createdAt within a collection.
+  @@index([collectionId, isArchived, createdAt])
+  // Supports plain isArchived filtering across all collections.
+  @@index([isArchived])
+  @@map("documents")
+}
