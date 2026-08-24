@@ -1,0 +1,89 @@
+"""
+ISO-8601 date-time string, e.g. 2026-08-24T09:30:00.000Z
+"""
+scalar DateTime
+
+type Collection {
+  id: ID!
+  name: String!
+  slug: String!
+  createdAt: DateTime!
+  documents: [Document!]!
+}
+
+type Document {
+  id: ID!
+  title: String!
+  content: String!
+  tags: [String!]!
+  isArchived: Boolean!
+  createdAt: DateTime!
+  collectionId: ID!
+  collection: Collection!
+}
+
+"""
+Cursor-paginated page of documents. `cursor` is a Document id — pass it
+back as the `cursor` argument on the next call to continue after this page.
+"""
+type DocumentPage {
+  items: [Document!]!
+  nextCursor: ID
+  hasMore: Boolean!
+}
+
+type Query {
+  """All collections, ordered by creation date (newest first)."""
+  collections: [Collection!]!
+
+  """A single collection with its nested documents, or null if not found."""
+  collection(id: ID!): Collection
+
+  """
+  Search and filter documents across the vault.
+  - search: case-insensitive substring match on title OR content
+  - collectionId: restrict to one collection
+  - isArchived: restrict to archived / non-archived documents
+  - take: page size, 1-100, defaults to 20
+  - cursor: id of the last document from the previous page
+  """
+  documents(
+    collectionId: ID
+    search: String
+    isArchived: Boolean
+    take: Int
+    cursor: ID
+  ): DocumentPage!
+}
+
+input CreateCollectionInput {
+  name: String!
+  slug: String!
+}
+
+input CreateDocumentInput {
+  title: String!
+  content: String!
+  collectionId: ID!
+  tags: [String!]
+}
+
+input UpdateDocumentInput {
+  title: String
+  content: String
+  tags: [String!]
+  isArchived: Boolean
+}
+
+type Mutation {
+  createCollection(input: CreateCollectionInput!): Collection!
+
+  createDocument(input: CreateDocumentInput!): Document!
+
+  updateDocument(id: ID!, input: UpdateDocumentInput!): Document!
+
+  deleteDocument(id: ID!): Boolean!
+
+  """Move a document into a different collection."""
+  moveDocument(id: ID!, collectionId: ID!): Document!
+}
