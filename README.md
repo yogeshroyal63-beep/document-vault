@@ -12,33 +12,25 @@ PostgreSQL, and Prisma.
 cp .env.example .env
 docker compose up -d
 bun install
-bun run setup:first-run   # first time only — creates the initial migration
+bun run gendb
 bun run dev
 ```
-
-After the first run, `docker compose up -d && bun install && bun run gendb && bun run dev`
-is the steady-state one-command flow (`gendb` applies already-generated
-migrations with `prisma migrate deploy`, rather than creating new ones —
-that's what CI uses too).
-
-**Why the split:** this repo intentionally does not ship a
-`prisma/migrations/` folder. The assignment requires every schema change
-to go through a real `prisma migrate dev` — never hand-written or
-hand-edited SQL — and I built this without a live Postgres connection
-available to actually run that command and generate the migration file
-myself. Running `bun run setup:first-run` on your machine generates it for
-real, against your real database, which is the only way to satisfy that
-requirement honestly. It only needs to happen once; the migration file it
-creates should then be committed.
 
 That:
 1. starts Postgres (with a second `document_vault_test` database for
    integration tests, created by `docker/init-test-db.sql`)
 2. installs dependencies
-3. creates and applies the initial migration, and generates the Prisma
-   client
+3. applies the committed migration (`prisma/migrations/`) and generates
+   the Prisma client
 4. starts the dev server with hot reload at `http://localhost:4000/graphql`
    (GraphiQL is available there in the browser)
+
+The migration under `prisma/migrations/` was generated with a real
+`bun run migrate:dev` (which wraps `prisma migrate dev`) against a live
+Postgres instance and is committed as-is — nothing under that folder was
+hand-written or hand-edited. If you change `prisma/schema.prisma`, run
+`bun run migrate:dev` again to generate a new migration; don't edit SQL
+under `prisma/migrations/` directly.
 
 ### Requirements
 
@@ -51,9 +43,8 @@ That:
 |---|---|
 | `bun run dev` | Start the server with hot reload |
 | `bun run start` | Start the server (no watch) |
-| `bun run setup:first-run` | Create + apply the initial migration and generate the client — run this exactly once, before anything else |
-| `bun run gendb` | Apply already-generated migrations (`migrate deploy`) + generate the client — used for every run after the first, and in CI |
-| `bun run migrate:dev` | Create and apply a new migration from schema changes (interactive, prompts for a migration name) |
+| `bun run gendb` | Apply the committed migration (`migrate deploy`) + generate the client — used for every run, including first-time setup and CI |
+| `bun run migrate:dev` | Create and apply a new migration after a schema change (interactive, prompts for a migration name) |
 | `bun run lint` | ESLint |
 | `bun run typecheck` | `tsc --noEmit` |
 | `bun run test` | All tests (unit + integration) |
@@ -84,6 +75,16 @@ In practice it's simplest to keep both `document_vault` and
 `document_vault_test` migrated together — `bun run gendb` applies
 migrations to whatever `DATABASE_URL` currently points at, so run it once
 per database the first time you set up the project.
+
+**Two ESLint rules are turned off for `src/__tests__/**` only**
+(`.eslintrc.json`): `require-await` (the in-memory fake Prisma client's
+methods are declared `async` to match the real client's interface, but a
+plain in-memory array has no actual `await` inside) and `await-thenable`
+(bun-types currently types `expect(...).rejects` as `Matchers<unknown>`
+rather than a proper awaitable chain, even though `await
+expect(promise).rejects.toThrow(...)` is the pattern Bun's own docs use —
+this is a gap in the type declarations, not the code). Both are scoped
+strictly to test files; application code has no overrides.
 
 ## Domain model
 
@@ -208,6 +209,29 @@ here rather than left implicit:
   matches the API almost all current Prisma documentation and tooling
   assumes — the safer choice for a project meant to be picked up and run
   by someone else without extra setup friction.
+- **Concurrent-request races are mapped to clean errors, not left as raw
+  Prisma exceptions.** Several mutations do a friendly existence/uniqueness
+  check before writing (e.g. `createCollection` checks the slug isn't
+  taken before inserting). That check is a fast path for the common case,
+  not what actually enforces correctness — the DB constraints do that. If
+  two requests race and the loser's check passes but its write then hits
+  a real constraint violation (a duplicate slug, a deleted document, a
+  deleted parent collection), `toAppError` in `src/lib/errors.ts` maps
+  Prisma's `P2002`/`P2025`/`P2003` codes back to the same
+  `ConflictError`/`NotFoundError` types the pre-check would have thrown,
+  so the client never sees a raw 500 just because it lost a race.
+- **Cursor pagination degrades gracefully if the cursor row was deleted.**
+  Prisma's `cursor` pagination works by looking up the cursor id's
+  position first; if that row was deleted between page 1 and a page-2
+  request, the lookup fails. Rather than let that surface as an opaque
+  error, `resolveCursorError` (`src/lib/pagination.ts`) turns it into a
+  `BAD_USER_INPUT` error telling the caller to restart pagination without
+  a cursor.
+- **Tags are validated, not accepted as-is.** Empty/whitespace tags,
+  tags over 50 characters, and more than 20 tags on one document are all
+  rejected; tags are trimmed and de-duplicated on the way in. None of this
+  was explicitly requested, but an unvalidated string array is an easy
+  place for silent bad data to accumulate.
 
 ## What's explicitly out of scope
 
