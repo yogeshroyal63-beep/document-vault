@@ -1,6 +1,6 @@
 import type { Collection, Document } from "@prisma/client";
 import type { GraphQLContext } from "../context.js";
-import { ConflictError, NotFoundError } from "../lib/errors.js";
+import { ConflictError, NotFoundError, toAppError } from "../lib/errors.js";
 import { assertNonEmpty, assertValidSlug } from "../lib/validation.js";
 
 interface CreateCollectionInput {
@@ -44,9 +44,20 @@ export const collectionMutations = {
       throw new ConflictError(`a collection with slug "${slug}" already exists`);
     }
 
-    return ctx.prisma.collection.create({
-      data: { name, slug },
-    });
+    // The findUnique check above is an optimistic pre-check for a fast,
+    // friendly error in the common case — it is NOT what actually
+    // guarantees uniqueness (the @unique constraint in schema.prisma does
+    // that). Two concurrent requests can both pass the check above before
+    // either inserts; the loser's create() then hits the real DB
+    // constraint and throws a raw Prisma P2002, which toAppError maps
+    // back to the same clean ConflictError instead of a raw 500.
+    try {
+      return await ctx.prisma.collection.create({
+        data: { name, slug },
+      });
+    } catch (err) {
+      toAppError(err, { entity: "collection" });
+    }
   },
 };
 
