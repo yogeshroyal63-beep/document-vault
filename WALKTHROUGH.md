@@ -1,128 +1,88 @@
 # Walkthrough
 
 This is a written walkthrough of the implementation and key decisions,
-covering what a 5–10 min video would. (If a video is still expected, this
-doc is the script — happy to record over it.)
+covering the same material I would present in a 5–10 minute implementation
+walkthrough.
 
 ## What it does
 
-A GraphQL API for organizing documents into collections: create/manage
-both, move a document between collections, search by substring on
-title/content, filter by collection or archived state, fetch a collection
-with its nested documents, and paginate documents with a cursor.
+Document Vault is a small GraphQL backend API for organizing documents into
+collections.
 
-## Structure
+The API supports:
 
-```
-prisma/schema.prisma          Data model + indexes
-src/schema/schema.graphql     GraphQL contract (SDL, schema-first)
-src/schema/index.ts           Wires SDL + resolvers into an executable schema
-src/resolvers/                One file per domain area (collection, document)
-src/lib/                      errors.ts, validation.ts, pagination.ts, prisma.ts
-src/context.ts                GraphQL context (wraps the Prisma client)
-src/index.ts                  Server entrypoint (GraphQL Yoga + Bun.serve)
-src/__tests__/unit/           Fast tests against an in-memory fake Prisma client
-src/__tests__/integration/    Real Prisma client against Dockerized Postgres
-```
+- Creating and querying collections
+- Creating, updating, deleting, and moving documents
+- Fetching a single collection with its nested documents
+- Searching documents by substring match on title or content
+- Filtering documents by collection or archived state
+- Cursor-based pagination using `take` and `cursor`
+- Validation of titles, content, slugs, and pagination inputs
+- Structured GraphQL errors for validation, conflicts, and missing records
 
-## Key decisions, and why
+The implementation intentionally stays within the assignment scope and does
+not introduce authentication, RBAC, caching, federation, or deployment
+infrastructure.
 
-**Schema-first, not code-first.** The assignment asked for a `.graphql`
-file + resolvers specifically, so `schema.graphql` is the single source of
-truth for the API contract, and resolvers are typed against it by hand
-(no codegen) — deliberately, to keep the dependency surface small for a
-project this size.
+## Technology stack
 
-**Prisma pinned to 6.19.3, not 7.** Prisma 7 shipped after I'd started and
-changes how the client connects to the database (datasource URLs move out
-of `schema.prisma` into a new `prisma.config.ts`, and it now wants a
-driver adapter like `@prisma/adapter-pg` instead of the classic engine).
-That's a reasonable direction for Prisma to take, but it's a meaningfully
-different setup from what most current tutorials/docs assume, and I'd
-rather hand over something that behaves exactly the way the ecosystem
-currently expects than something correct-but-unfamiliar. 6.19.3 is the
-last stable release on the pre-7 line.
+- Bun
+- TypeScript in strict mode
+- GraphQL Yoga
+- GraphQL SDL / schema-first design
+- PostgreSQL
+- Prisma ORM
+- Docker Compose
+- Bun test
+- ESLint
+- GitHub Actions
 
-**Error handling.** Every resolver that can fail on bad input or a missing
-record throws a typed error (`ValidationError`, `NotFoundError`,
-`ConflictError`) that extends `GraphQLError` directly, so GraphQL Yoga
-serializes it as a proper GraphQL error with an `extensions.code` — never
-a bare 500. Anything *not* wrapped in one of those types (a real bug, a
-dropped DB connection) is left alone and surfaces as
-`INTERNAL_SERVER_ERROR`, on purpose — I didn't want a blanket try/catch
-that quietly turns real bugs into clean-looking user errors.
+GraphQL Yoga is used as the HTTP GraphQL server, while the GraphQL schema is
+defined separately using SDL and combined with the resolver map into an
+executable schema.
 
-**`updateDocument` fetches the record before updating it**, even though
-Prisma's own `update` would throw on a missing row anyway (a `P2025`
-error). That's so the error the client sees is our clean `NotFoundError`
-with a real code, not a raw Prisma exception. Same pattern in
-`deleteDocument` and `moveDocument`.
+## Project structure
 
-**Cursor pagination** orders by `(createdAt desc, id desc)`, not
-`createdAt` alone. `createdAt` isn't guaranteed unique — two documents
-created in the same request or the same millisecond in a bulk import
-would collide — and a non-unique sort key can cause a cursor page to skip
-or repeat rows. Adding `id` as a tiebreaker makes the order total. The
-implementation fetches `take + 1` rows and uses the extra one only to
-compute `hasMore`, never returning it (`src/lib/pagination.ts`).
+```text
+prisma/
+  schema.prisma                 Data model and database indexes
+  migrations/                   Generated Prisma migrations
 
-**Slug validation** is deliberately explicit rather than assumed: the
-assignment says reject malformed slugs but doesn't define the format, so
-I picked lowercase kebab-case (`quarterly-reports-2026`) and said so in
-the README, rather than silently picking a convention and hoping it
-matches expectations.
+src/
+  schema/
+    schema.graphql               GraphQL API contract
+    index.ts                     Builds executable schema
 
-**Cascade delete on `Collection → Document`** — deleting a collection
-takes its documents with it. This wasn't specified either way; I picked
-the simpler option within scope and documented the tradeoff (a `Restrict`
-policy, forcing documents to be moved out first, is the safer alternative
-for a real product and is a one-line schema change).
+  resolvers/
+    collection.resolvers.ts      Collection queries and mutations
+    document.resolvers.ts        Document queries and mutations
+    scalars.ts                   DateTime scalar
+    index.ts                     Root resolver map
 
-## Testing approach
+  lib/
+    errors.ts                    Typed GraphQL application errors
+    validation.ts                Input validation helpers
+    pagination.ts                Cursor pagination helper
+    prisma.ts                    Prisma Client singleton
 
-Two layers, deliberately different in what they verify:
+  context.ts                     GraphQL request context
+  index.ts                        Server entrypoint
 
-1. **Unit tests** (49 tests, all passing) run resolver logic against a
-   small hand-written in-memory fake of the Prisma client
-   (`fakePrisma.ts`) — fast, no database, and focused on validation logic,
-   error mapping, and pagination shape. While building this I actually
-   caught a real bug this way: the fake's `update()` method didn't handle
-   the `collectionId` field, which made `moveDocument`'s unit test fail
-   even though the real resolver was correct — a good example of exactly
-   what unit tests are supposed to catch, just in the test scaffolding
-   instead of the implementation this time.
+  __tests__/
+    unit/
+      fakePrisma.ts              In-memory Prisma test double
+      validation.test.ts         Validation tests
+      collection.resolvers.test.ts
+      document.resolvers.test.ts
 
-2. **Integration test** runs the real Prisma client against the
-   Dockerized Postgres instance (a separate `document_vault_test`
-   database), exercising a full flow — create collection → create
-   document → search → move → archive → delete — plus a dedicated
-   case-insensitive search check and a cursor-pagination check. This is
-   the layer that actually proves the migrations are correct and that
-   Postgres's `ILIKE` behaves the way the unit tests' fake assumes.
+    integration/
+      document-vault.integration.test.ts
 
-## Honest caveat on what I could verify directly
+docker/
+  init-test-db.sql                Creates the separate integration-test DB
 
-I built this without a live Bun runtime or Docker daemon available in my
-own environment, so I verified what I could indirectly: I ran the full
-resolver test suite through a temporary Node/Vitest shim mapping
-`bun:test`'s API (which is how I caught the `moveDocument` bug above), and
-ran `tsc --noEmit` / `eslint` against the real code using a hand-written
-type stub matching Prisma's generated types, since generating the real
-client requires a binary download my environment couldn't reach. Both
-passed clean.
-
-**One consequence worth calling out explicitly: this repo does not include
-a `prisma/migrations/` folder.** The assignment requires every schema
-change to go through a real `prisma migrate dev` — never hand-written or
-hand-edited SQL — and without a reachable Postgres instance I couldn't run
-that command myself and still satisfy that requirement honestly. Run
-`bun run setup:first-run` once, locally, before anything else — it creates
-the real migration against your real database. Commit the resulting
-`prisma/migrations/` folder as your first commit. Everything downstream
-(the integration test, CI, `gendb` on subsequent runs) depends on that
-migration existing.
-
-I have not personally executed `bun install`, `prisma migrate dev` against
-a real Postgres, or the integration test itself. I'd treat getting a clean
-first run of `setup:first-run` as the very first thing to verify after
-cloning.
+docker-compose.yml                PostgreSQL development/test environment
+Dockerfile                        Service container image
+.github/workflows/ci.yml          GitHub Actions CI
+README.md                         Setup and API documentation
+WALKTHROUGH.md                    This implementation walkthrough
