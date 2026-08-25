@@ -48,3 +48,49 @@ export class ConflictError extends AppError {
     this.name = "ConflictError";
   }
 }
+
+/**
+ * Narrow shape of Prisma's PrismaClientKnownRequestError — checked
+ * structurally (duck-typed) rather than via `instanceof` so this file
+ * doesn't need a runtime import of @prisma/client just to catch errors.
+ */
+interface PrismaKnownError {
+  code: string;
+  meta?: { target?: string[] };
+}
+
+function isPrismaKnownError(err: unknown): err is PrismaKnownError {
+  if (typeof err !== "object" || err === null || !("code" in err)) {
+    return false;
+  }
+  return typeof err.code === "string";
+}
+
+/**
+ * Maps a Prisma error thrown mid-request (typically a race lost between
+ * an app-level check and the actual write — see createCollection's slug
+ * check, or a concurrent delete during updateDocument/moveDocument) to
+ * one of our clean AppError types, so a raw Prisma exception never
+ * reaches the client as an opaque 500.
+ *
+ * Anything that isn't a recognized Prisma error code is rethrown as-is —
+ * this function only translates the specific races this codebase is
+ * exposed to, not a general Prisma error catch-all.
+ */
+export function toAppError(err: unknown, context: { entity: string; id?: string }): never {
+  if (isPrismaKnownError(err)) {
+    if (err.code === "P2002") {
+      const field = err.meta?.target?.join(", ") ?? "field";
+      throw new ConflictError(`a ${context.entity} with this ${field} already exists`);
+    }
+    if (err.code === "P2025") {
+      throw new NotFoundError(context.entity, context.id ?? "unknown");
+    }
+    if (err.code === "P2003") {
+      // Foreign key violation — the referenced row (e.g. a collectionId
+      // that pointed at a now-deleted Collection) no longer exists.
+      throw new NotFoundError(context.entity, context.id ?? "unknown");
+    }
+  }
+  throw err;
+}
