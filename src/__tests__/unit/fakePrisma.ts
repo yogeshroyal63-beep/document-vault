@@ -1,6 +1,4 @@
-/* eslint-disable @typescript-eslint/require-await */
-
-import type { Collection, Document, Prisma, PrismaClient } from "@prisma/client";
+﻿import type { Collection, Document, Prisma, PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -10,7 +8,7 @@ import { randomUUID } from "node:crypto";
  * it's a tiny hand-written fake that implements just the handful of
  * methods our resolvers call (findMany, findUnique, create, update,
  * delete), backed by plain arrays. That keeps unit tests fast, dependency
- * free, and focused on resolver *logic* (validation, error mapping,
+ * free, and focused on resolver logic (validation, error mapping,
  * pagination shape) rather than Prisma's query engine — which is instead
  * exercised for real in the integration test against Dockerized Postgres.
  */
@@ -18,9 +16,29 @@ export function createFakePrisma() {
   const collections: Collection[] = [];
   const documents: Document[] = [];
 
+  /**
+   * Narrows a Prisma string-filter field down to the lowercase
+   * substring term, or null if the clause wasn't a contains filter.
+   */
+  function extractContainsTerm(
+    field: string | Prisma.StringFilter<"Document"> | undefined,
+  ): string | null {
+    if (field === undefined || typeof field === "string") {
+      return null;
+    }
+
+    if (typeof field.contains !== "string") {
+      return null;
+    }
+
+    return field.contains.toLowerCase();
+  }
+
   const collection = {
     findMany: async (): Promise<Collection[]> =>
-      [...collections].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()),
+      [...collections].sort(
+        (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+      ),
 
     findUnique: async (args: {
       where: { id?: string; slug?: string };
@@ -75,29 +93,13 @@ export function createFakePrisma() {
 
         rows = rows.filter((d) =>
           terms.some((clause) => {
-            const titleFilter = clause.title;
-            const contentFilter = clause.content;
-
-            const titleTerm =
-              typeof titleFilter === "object" &&
-              titleFilter !== null &&
-              "contains" in titleFilter &&
-              typeof titleFilter.contains === "string"
-                ? titleFilter.contains.toLowerCase()
-                : undefined;
-
-            const contentTerm =
-              typeof contentFilter === "object" &&
-              contentFilter !== null &&
-              "contains" in contentFilter &&
-              typeof contentFilter.contains === "string"
-                ? contentFilter.contains.toLowerCase()
-                : undefined;
+            const titleTerm = extractContainsTerm(clause.title);
+            const contentTerm = extractContainsTerm(clause.content);
 
             return (
-              (titleTerm !== undefined &&
+              (titleTerm !== null &&
                 d.title.toLowerCase().includes(titleTerm)) ||
-              (contentTerm !== undefined &&
+              (contentTerm !== null &&
                 d.content.toLowerCase().includes(contentTerm))
             );
           }),
@@ -156,7 +158,9 @@ export function createFakePrisma() {
 
     update: async (args: {
       where: { id: string };
-      data: Prisma.DocumentUpdateInput & { collectionId?: string };
+      data: Prisma.DocumentUpdateInput & {
+        collection?: { connect: { id: string } };
+      };
     }): Promise<Document> => {
       const idx = documents.findIndex((d) => d.id === args.where.id);
 
@@ -189,13 +193,12 @@ export function createFakePrisma() {
           ? { isArchived: args.data.isArchived as boolean }
           : {}),
 
-        ...(args.data.collectionId !== undefined
-          ? { collectionId: args.data.collectionId }
+        ...(args.data.collection?.connect?.id !== undefined
+          ? { collectionId: args.data.collection.connect.id }
           : {}),
       };
 
       documents[idx] = updated;
-
       return updated;
     },
 
