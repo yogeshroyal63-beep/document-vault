@@ -30,6 +30,37 @@ export function assertValidSlug(slug: string): string {
 const MAX_TAKE = 100;
 const DEFAULT_TAKE = 20;
 
+const MAX_TAGS = 20;
+const MAX_TAG_LENGTH = 50;
+
+/**
+ * Validates and normalizes a tags array. Rejects empty/whitespace-only
+ * tags and tags over MAX_TAG_LENGTH (both almost certainly bugs on the
+ * caller's side, same reasoning as resolveTake below), caps the array at
+ * MAX_TAGS, trims each tag, and de-duplicates — "finance" and "finance "
+ * or a repeated tag shouldn't create two distinct tags.
+ */
+export function assertValidTags(tags: string[] | null | undefined): string[] {
+  if (!tags || tags.length === 0) {
+    return [];
+  }
+  if (tags.length > MAX_TAGS) {
+    throw new ValidationError(`a document may have at most ${MAX_TAGS} tags`);
+  }
+
+  const normalized = tags.map((tag) => tag.trim());
+  const empty = normalized.find((tag) => tag.length === 0);
+  if (empty !== undefined) {
+    throw new ValidationError("tags must not be empty or whitespace-only");
+  }
+  const tooLong = normalized.find((tag) => tag.length > MAX_TAG_LENGTH);
+  if (tooLong !== undefined) {
+    throw new ValidationError(`tags must be at most ${MAX_TAG_LENGTH} characters ("${tooLong}" is longer)`);
+  }
+
+  return [...new Set(normalized)];
+}
+
 /**
  * Clamps and validates the `take` argument for cursor pagination.
  * Throws on values that are clearly wrong (<= 0) instead of silently

@@ -78,11 +78,25 @@ the simpler option within scope and documented the tradeoff (a `Restrict`
 policy, forcing documents to be moved out first, is the safer alternative
 for a real product and is a one-line schema change).
 
+**Concurrent-request races are mapped to clean errors.** A pre-check like
+"does this slug already exist" is a fast path, not the actual guarantee —
+the DB's unique/foreign-key constraints are. If two requests race and the
+loser's write then hits a real constraint violation, `toAppError`
+(`src/lib/errors.ts`) maps Prisma's error codes back to the same clean
+error types the pre-check would have thrown, so a lost race never looks
+like a server crash to the client.
+
+**Cursor pagination handles a deleted cursor row.** Prisma resolves a
+`cursor: { id }` argument by looking up that row's position first; if the
+row was deleted since the previous page was fetched, that lookup fails.
+`resolveCursorError` turns that into a clear, actionable
+`BAD_USER_INPUT` error instead of an opaque failure.
+
 ## Testing approach
 
 Two layers, deliberately different in what they verify:
 
-1. **Unit tests** (49 tests, all passing) run resolver logic against a
+1. **Unit tests** (65 tests, all passing) run resolver logic against a
    small hand-written in-memory fake of the Prisma client
    (`fakePrisma.ts`) — fast, no database, and focused on validation logic,
    error mapping, and pagination shape. While building this I actually
@@ -90,7 +104,14 @@ Two layers, deliberately different in what they verify:
    the `collectionId` field, which made `moveDocument`'s unit test fail
    even though the real resolver was correct — a good example of exactly
    what unit tests are supposed to catch, just in the test scaffolding
-   instead of the implementation this time.
+   instead of the implementation this time. I later ran a second,
+   deliberate audit pass over the whole codebase looking specifically for
+   bugs rather than re-confirming what I already believed was correct —
+   that pass found and fixed the concurrent-request race handling and the
+   deleted-cursor-row handling described above, plus added tag validation
+   (empty/oversized/duplicate tags) that had been accepted silently
+   before. New tests cover all of it (`errors.test.ts`, and the tag cases
+   in `validation.test.ts`).
 
 2. **Integration test** runs the real Prisma client against the
    Dockerized Postgres instance (a separate `document_vault_test`
@@ -102,27 +123,29 @@ Two layers, deliberately different in what they verify:
 
 ## Honest caveat on what I could verify directly
 
-I built this without a live Bun runtime or Docker daemon available in my
-own environment, so I verified what I could indirectly: I ran the full
-resolver test suite through a temporary Node/Vitest shim mapping
-`bun:test`'s API (which is how I caught the `moveDocument` bug above), and
-ran `tsc --noEmit` / `eslint` against the real code using a hand-written
-type stub matching Prisma's generated types, since generating the real
-client requires a binary download my environment couldn't reach. Both
-passed clean.
+I built the initial version without a live Bun runtime or Docker daemon
+available in my own environment, so at that point I verified what I could
+indirectly: I ran the resolver test suite through a temporary Node/Vitest
+shim mapping `bun:test`'s API (which is how I caught the `moveDocument`
+bug above), and ran `tsc --noEmit` / `eslint` against the real code using
+a hand-written type stub matching Prisma's generated types, since
+generating the real client requires a binary download my environment
+couldn't reach.
 
-**One consequence worth calling out explicitly: this repo does not include
-a `prisma/migrations/` folder.** The assignment requires every schema
-change to go through a real `prisma migrate dev` — never hand-written or
-hand-edited SQL — and without a reachable Postgres instance I couldn't run
-that command myself and still satisfy that requirement honestly. Run
-`bun run setup:first-run` once, locally, before anything else — it creates
-the real migration against your real database. Commit the resulting
-`prisma/migrations/` folder as your first commit. Everything downstream
-(the integration test, CI, `gendb` on subsequent runs) depends on that
-migration existing.
+At that stage `prisma/migrations/` didn't exist yet in the repo — it
+needed a real `prisma migrate dev` against a real Postgres instance,
+which I couldn't run myself. That's since been done for real, locally,
+against Docker Postgres, and the resulting migration
+(`prisma/migrations/20260824164629_init/migration.sql`) is committed —
+I checked its contents and confirmed it matches `schema.prisma` exactly:
+both tables, the unique slug constraint, both indexes, and the cascade
+foreign key. That was the one piece I couldn't produce myself, and it's
+now real.
 
-I have not personally executed `bun install`, `prisma migrate dev` against
-a real Postgres, or the integration test itself. I'd treat getting a clean
-first run of `setup:first-run` as the very first thing to verify after
-cloning.
+The audit pass (the race-condition and cursor-deletion fixes described
+above) was verified the same indirect way as the initial build — Node/
+Vitest shim for the test suite, stub types for `tsc`/`eslint` — since I
+still don't have a live Bun+Postgres environment. The integration test
+itself has still not been executed by me directly; I'd treat running
+`bun run test:integration` as the next thing to confirm, if it hasn't
+been run since these changes.

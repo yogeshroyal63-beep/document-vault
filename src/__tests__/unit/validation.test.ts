@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { assertNonEmpty, assertValidSlug, resolveTake } from "../../lib/validation.js";
+import { assertNonEmpty, assertValidSlug, assertValidTags, resolveTake } from "../../lib/validation.js";
 import { ValidationError } from "../../lib/errors.js";
 
 describe("assertNonEmpty", () => {
@@ -82,5 +82,52 @@ describe("resolveTake", () => {
 
   test("throws on non-integer values", () => {
     expect(() => resolveTake(1.5)).toThrow(ValidationError);
+  });
+});
+
+describe("assertValidTags", () => {
+  test("returns an empty array when tags is null or undefined", () => {
+    expect(assertValidTags(null)).toEqual([]);
+    expect(assertValidTags(undefined)).toEqual([]);
+  });
+
+  test("returns an empty array when tags is an empty array", () => {
+    expect(assertValidTags([])).toEqual([]);
+  });
+
+  test("trims each tag", () => {
+    expect(assertValidTags([" finance ", "q1"])).toEqual(["finance", "q1"]);
+  });
+
+  test("de-duplicates tags after trimming", () => {
+    expect(assertValidTags(["finance", "finance ", " finance"])).toEqual(["finance"]);
+  });
+
+  test("throws ValidationError on an empty-string tag", () => {
+    expect(() => assertValidTags(["finance", ""])).toThrow(ValidationError);
+  });
+
+  test("throws ValidationError on a whitespace-only tag", () => {
+    expect(() => assertValidTags(["   "])).toThrow(ValidationError);
+  });
+
+  test("throws ValidationError when a tag exceeds the max length", () => {
+    const longTag = "a".repeat(51);
+    expect(() => assertValidTags([longTag])).toThrow(ValidationError);
+  });
+
+  test("accepts a tag at exactly the max length", () => {
+    const maxTag = "a".repeat(50);
+    expect(assertValidTags([maxTag])).toEqual([maxTag]);
+  });
+
+  test("throws ValidationError when more than 20 tags are given", () => {
+    const tooMany = Array.from({ length: 21 }, (_, i) => `tag${i}`);
+    expect(() => assertValidTags(tooMany)).toThrow(ValidationError);
+  });
+
+  test("accepts exactly 20 tags", () => {
+    const twenty = Array.from({ length: 20 }, (_, i) => `tag${i}`);
+    expect(assertValidTags(twenty)).toHaveLength(20);
   });
 });
